@@ -368,6 +368,22 @@ input[type=range]{width:100%;height:36px;accent-color:var(--brass);background:tr
 .pick-btn{min-height:44px;padding:0 16px;border-radius:12px;border:1.5px solid var(--line);background:rgba(0,0,0,.18);font-weight:600;font-size:15px}
 .pick-btn.on{background:var(--ivory);color:var(--ink);border-color:var(--ivory)}
 .pick-btn.on::before{content:"♠ "}
+.runopts{display:grid;gap:8px;margin-top:14px}
+.runopt{display:grid;gap:2px;text-align:left;padding:12px 16px;border-radius:14px;border:1.5px solid var(--line);background:rgba(0,0,0,.18)}
+.runopt b{font-family:var(--display);font-weight:800;font-size:22px;letter-spacing:.04em;text-transform:uppercase}
+.runopt span{color:var(--muted);font-size:13px}
+.runopt.on{border-color:var(--brass);background:rgba(224,177,85,.1)}
+.runopt:active{transform:scale(.99)}
+.runbar{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 12px;border-radius:12px;background:rgba(224,177,85,.1);border:1px solid rgba(224,177,85,.35)}
+.runbar span{font-size:14px}
+.runbar b{color:var(--brass)}
+.runbar .btn-sec{margin:0;height:36px}
+.runrow{display:grid;grid-template-columns:auto 1fr;align-items:center;gap:10px}
+.runrow + .runrow{margin-top:8px;padding-top:8px;border-top:1px dashed var(--line)}
+.runlbl{display:grid;font-size:13px;font-weight:700;color:var(--muted);min-width:58px}
+.runlbl small{font-weight:600;color:var(--brass);font-variant-numeric:tabular-nums}
+.splitnote{margin:10px 0 0;font-size:13px;color:var(--muted)}
+.splitnote b{color:var(--ivory)}
 .m-sec{padding-block:14px;border-top:1px solid var(--line)}
 .m-sec:first-child{border-top:0}
 .m-row{display:flex;justify-content:space-between;align-items:center;gap:14px}
@@ -641,6 +657,16 @@ input[type=range]{width:100%;height:36px;accent-color:var(--brass);background:tr
     <p class="hint" id="sd-hint"></p>
     <div class="sd-body" id="sd-body"></div>
     <div class="sheet-actions"><button class="btn b-fold" data-close>Later</button><button class="btn b-raise" id="sd-award" disabled>Pay out</button></div>
+  </div>
+</div>
+
+<div class="sheet" id="sheet-runs" hidden>
+  <div class="sheet-panel" role="dialog" aria-labelledby="ru-title">
+    <div class="grab"></div>
+    <h2 id="ru-title">Run it how many times?</h2>
+    <p class="hint" id="ru-hint"></p>
+    <div class="runopts" id="ru-opts"></div>
+    <div class="sheet-actions" style="grid-template-columns:1fr"><button class="btn b-fold" data-close>Later</button></div>
   </div>
 </div>
 
@@ -3361,7 +3387,7 @@ function finishHand(){
   applyTopUps();
   for (let i = S.players.length - 1; i >= 0; i--) if (S.players[i].leaving) removeSeat(i);
   S.stage = funded() < 2 ? 'over' : 'done';
-  S.pots = null; S.runout = false; S.toAct = -1;
+  S.pots = null; S.runout = false; S.runs = 1; S.toAct = -1;
 }
 function startHand(){
   applyTopUps();
@@ -3370,7 +3396,7 @@ function startHand(){
     Object.assign(p, { bet: 0, committed: 0, folded: p.out, allIn: false, acted: false, locked: false, last: p.out ? 'Out of chips' : '' });
   });
   const liveN = S.players.filter(p => !p.out).length;
-  S.pots = null; S.runout = false;
+  S.pots = null; S.runout = false; S.runs = 1;
   if (liveN < 2){ S.stage = S.hand ? 'over' : 'lobby'; S.toAct = -1; return null; }
   S.hand++; S.street = 0; S.stage = 'betting'; S.result = ''; S.resultSub = '';
   S.lastDealt = S.players.filter(p => !p.out).map(p => p.tag); S.lastWin = [];
@@ -3431,6 +3457,8 @@ function endStreet(){
     const left = 5 - BOARD[S.street];
     S.runout = S.street < 3; S.stage = 'showdown'; S.toAct = -1;
     S.pots = buildPots().map(pt => ({ ...pt, win: pt.elig.length === 1 ? [pt.elig[0]] : [] }));
+    // An all-in with cards still to come: the table picks how many times to run the board before anyone is paid (0 = not picked yet).
+    S.runs = S.runout && S.pots.some(pt => pt.elig.length > 1) ? 0 : 1;
     log(S.runout ? 'No more betting. Deal out the board' : 'Showdown');
     return { kind: 'showdown', deal: left };
   }
@@ -3512,6 +3540,7 @@ function recordHand(pot, wins, sd){
   const h = { n: S.hand, pot, t: Date.now(), win: wins };
   if (S.cur){ h.p = S.cur.p; h.a = S.cur.a; }
   if (sd) h.sd = sd;
+  if (sd && S.runs > 1) h.runs = S.runs;
   S.hands.push(h); S.cur = null;
   if (S.hands.length > 1000) S.hands.shift();
 }
@@ -3534,19 +3563,51 @@ function winUncontested(w){
   finishHand();
   return { kind: 'win', tags: [tag] };
 }
+/* ---- running the board more than once ----
+   After an all-in the players can deal the rest of the board up to 4 times. Every pot is cut into that many equal
+   shares, one per run, and each run's share goes to whoever wins that run. Heads-up over four runs that comes out
+   100/0, 75/25 or 50/50; over two runs 100/0 or 50/50. */
+const MAX_RUNS = 4;
+const RUN_WORD = ['', 'once', 'twice', 'three times', 'four times'];
+const needRuns = (st = S) => st.stage === 'showdown' && st.runout && !st.runs;
+/* The winner lists for a pot, one per run. A pot only one player can win is never split by runs. */
+const potRuns = pt => S.runs > 1 && pt.elig.length > 1 && Array.isArray(pt.runWin) ? pt.runWin : [pt.win];
+function setRunWin(pt, r, w){ if (potRuns(pt) === pt.runWin) pt.runWin[r] = w; else pt.win = w; }
+/* Chips in run r of a pot: equal shares, and the odd chips go to the earliest runs. */
+function runAmount(pt, r, n){ const base = Math.floor(pt.amount / n); return base + (r < pt.amount - base * n ? 1 : 0); }
+function setRuns(n){
+  S.runs = n;
+  S.pots.forEach(pt => {
+    if (pt.elig.length < 2) return;
+    pt.win = [];
+    if (n > 1) pt.runWin = Array.from({ length: n }, () => []); else delete pt.runWin;
+  });
+}
+/* Who gets what from one pot: each run's share goes to that run's winner. Two or more winners of one run split it,
+   the odd chips going to the first of them left of the button. */
+function potShares(pt){
+  const n = S.players.length, ord = i => ((i - S.dealer - 1) % n + n) % n, out = {}, runs = potRuns(pt);
+  runs.forEach((win, r) => {
+    if (!win.length) return;
+    const amt = runAmount(pt, r, runs.length), w = [...win].sort((a, b) => ord(a) - ord(b));
+    const share = Math.floor(amt / w.length); let rem = amt - share * w.length;
+    w.forEach(i => { const g = share + (rem > 0 ? 1 : 0); if (rem > 0) rem--; out[i] = (out[i] || 0) + g; });
+  });
+  return out;
+}
+const potsReady = () => !!S.pots && !needRuns() && S.pots.every(pt => potRuns(pt).every(w => w.length));
 function engineAward(){
-  const n = S.players.length, ord = i => ((i - S.dealer - 1) % n + n) % n, gains = {};
+  const gains = {};
   S.pots.forEach(pt => {
     const contested = pt.elig.length > 1;
-    const w = [...pt.win].sort((a, b) => ord(a) - ord(b));
-    const share = Math.floor(pt.amount / w.length); let rem = pt.amount - share * w.length;
-    w.forEach(i => { const g = share + (rem > 0 ? 1 : 0); if (rem > 0) rem--; P(i).stack += g; if (contested) gains[i] = (gains[i] || 0) + g; });
+    Object.entries(potShares(pt)).forEach(([k, g]) => { const i = +k; P(i).stack += g; if (contested) gains[i] = (gains[i] || 0) + g; });
   });
   S.players.forEach((q, i) => { q.last = gains[i] ? `Won ${fmt(gains[i])}` : ''; });
   const ws = Object.keys(gains).map(Number);
   recordHand(S.pots.reduce((a, pt) => a + pt.amount, 0), ws.map(i => [P(i).name, gains[i]]), S.players.filter(q => !q.folded && !q.out).map(q => q.name));
   S.result = ws.length ? ws.map(i => `${P(i).name} +${fmt(gains[i])}`).join(' · ') : 'Pot paid out';
-  S.resultSub = ws.length > 1 ? 'Pot split' : 'Showdown'; S.lastWin = ws.map(i => P(i).tag);
+  S.resultSub = S.runs > 1 ? `Ran it ${RUN_WORD[S.runs]}${ws.length > 1 ? ' · pot split' : ''}` : ws.length > 1 ? 'Pot split' : 'Showdown';
+  S.lastWin = ws.map(i => P(i).tag);
   log(S.result);
   const tags = ws.map(i => P(i).tag);
   finishHand();
@@ -3896,8 +3957,19 @@ function hostDeal(){
   const after = startHand();
   commit({ kind: 'deal', after });
 }
+/* The host picks how many times the board is run. Picking a different number clears the winners picked so far. */
+function hostRuns(n){
+  if (!S || S.stage !== 'showdown' || !S.runout || !(n >= 1 && n <= MAX_RUNS)) return;
+  if (S.runs !== n){
+    setRuns(n);
+    log(n > 1 ? `Running it ${RUN_WORD[n]}` : 'Running it once');
+    commit(null, { seq: false });
+  }
+  Snd.tick(); closeSheets();
+  setTimeout(openShowdown, 240);
+}
 function hostAward(){
-  if (!S.pots || S.pots.some(pt => !pt.win.length)) return;
+  if (!potsReady()) return;
   snap();
   const r = engineAward();
   closeSheets();
@@ -4006,7 +4078,7 @@ function hostRender(){
     $('#h-url').textContent = (S.table.movedFrom ? `Moved from ${S.table.movedFrom}. Everyone rejoins here with the same name to get their chips back. ` : '') + url;
     $('#h-plist').innerHTML = S.players.length ? S.players.map(p => `<span>${avDisc(p.av, 26)}${esc(p.name)}<i class="dot ${isOn(p) ? 'on' : ''}"></i></span>`).join('') : '<span class="empty">Nobody yet. Scan the code with a phone camera.</span>';
   } else {
-    $('#h-street').textContent = S.closed ? 'Table closed' : S.stage === 'betting' ? STREETS[S.street] : S.stage === 'showdown' ? 'Showdown' : S.stage === 'over' ? 'Game paused' : 'Hand complete';
+    $('#h-street').textContent = S.closed ? 'Table closed' : S.stage === 'betting' ? STREETS[S.street] : S.stage === 'showdown' ? showdownTitle(S) : S.stage === 'over' ? 'Game paused' : 'Hand complete';
     $('#h-board').innerHTML = boardHTML(S, H.last);
     const pc = $('#h-potchip'); if (pc && !pc.style.backgroundImage && CHIP_IMG[0]) pc.style.backgroundImage = CHIP_IMG[0];
     $('#h-pot').textContent = fmt(potTotal());
@@ -4271,8 +4343,13 @@ function hostRenderDock(){
     msg = `<b>${esc(p.name)} to act</b><span>${toCall ? `${fmt(Math.min(toCall, p.stack))} to call` : 'Can check'} · ${isOn(p) ? 'acting on their phone' : VIEW ? 'phone offline' : 'phone offline, you can act for them'}</span>`;
     btns = `<button class="btn b-fold" data-h="actfor" data-i="${S.toAct}">Act for ${esc(p.name)}</button>`;
   } else if (S.stage === 'showdown'){
-    msg = `<b>Showdown</b><span>${S.runout ? 'Deal out the board, flip the cards, then pick the winner.' : 'Flip the cards, then pick the winner.'}</span>`;
-    btns = `<button class="btn b-raise" data-h="showdown">Choose winners</button>`;
+    if (needRuns()){
+      msg = `<b>All in</b><span>No more betting. Choose how many times to run the board.</span>`;
+      btns = `<button class="btn b-raise" data-h="showdown">Run it how many times?</button>`;
+    } else {
+      msg = `<b>${esc(showdownTitle(S))}</b><span>${S.runs > 1 ? `Deal the rest of the board ${RUN_WORD[S.runs]}, flip the cards, then pick the winner of each run.` : S.runout ? 'Deal out the board, flip the cards, then pick the winner.' : 'Flip the cards, then pick the winner.'}</span>`;
+      btns = `<button class="btn b-raise" data-h="showdown">Choose winners</button>`;
+    }
   } else if (S.stage === 'over'){
     const left = S.players.filter(p => p.stack > 0);
     msg = `<b>${left.length === 1 ? esc(left[0].name) + ' has every chip' : 'Waiting for chips'}</b><span>Busted players can buy in from their phones, or you can buy them in by tapping their seat.</span>`;
@@ -4385,26 +4462,60 @@ $('#seat-body').addEventListener('click', e => {
 });
 
 /* showdown */
-function openShowdown(){ if (!S || S.stage !== 'showdown') return; renderShowdown(); openSheet('#sheet-sd'); }
+/* "Showdown", or "Running it twice" when the board is run more than once (the table, watching screens and phones). */
+const showdownTitle = st => st.runs > 1 ? `Running it ${RUN_WORD[st.runs]}` : 'Showdown';
+/* After an all-in the run count is asked first, then the winners. */
+function openShowdown(){
+  if (!S || S.stage !== 'showdown') return;
+  if (needRuns()) return openRuns();
+  renderShowdown(); openSheet('#sheet-sd');
+}
+const RUN_OPTS = [
+  [1, 'Once', 'One board takes the whole pot'],
+  [2, 'Twice', 'Each board is worth half the pot: 100/0 or 50/50'],
+  [3, 'Three times', 'Each board is worth a third: 100/0 or 67/33'],
+  [4, 'Four times', 'Each board is worth a quarter: 100/0, 75/25 or 50/50']
+];
+function openRuns(){
+  if (!S || S.stage !== 'showdown' || !S.runout) return;
+  const allIn = S.players.filter(p => p.allIn && !p.folded && !p.out).map(p => p.name), left = 5 - BOARD[S.street];
+  $('#ru-hint').textContent = `${allIn.length ? allIn.join(' and ') + (allIn.length > 1 ? ' are' : ' is') + ' all in. ' : ''}Agree on it with the players, then deal the last ${left === 1 ? 'card' : left + ' cards'} that many times. Every pot is split evenly between the runs.`;
+  $('#ru-opts').innerHTML = RUN_OPTS.map(([n, t, d]) => `<button class="runopt${S.runs === n ? ' on' : ''}" data-runs="${n}" aria-pressed="${S.runs === n}"><b>${t}</b><span>${d}</span></button>`).join('');
+  openSheet('#sheet-runs');
+}
+$('#ru-opts').addEventListener('click', e => { const b = e.target.closest('[data-runs]'); if (b) hostRuns(+b.dataset.runs); });
 function renderShowdown(){
-  $('#sd-hint').textContent = (S.runout ? 'No more betting. Deal the rest of the board, flip the cards, then ' : 'Flip the cards, then ') + 'tap who won each pot. Tap two or more players to split.';
-  $('#sd-body').innerHTML = S.pots.map((pt, k) => {
+  const multi = S.runs > 1;
+  $('#sd-hint').textContent = multi ? `Deal the rest of the board ${RUN_WORD[S.runs]}, flip the cards, then tap who won each run. Each run is worth an equal share of the pot. Tap two or more players to split a run.`
+    : (S.runout ? 'No more betting. Deal the rest of the board, flip the cards, then ' : 'Flip the cards, then ') + 'tap who won each pot. Tap two or more players to split.';
+  const btn = (k, r, i, w) => `<button class="pick-btn${w.includes(i) ? ' on' : ''}" data-pot="${k}" data-run="${r}" data-i="${i}" aria-pressed="${w.includes(i)}">${esc(P(i).name)}</button>`;
+  const bar = S.runout ? `<div class="runbar"><span>Board runs: <b>${RUN_OPTS[(S.runs || 1) - 1][1]}</b></span><button class="btn-sec" data-runs-change>Change</button></div>` : '';
+  $('#sd-body').innerHTML = bar + S.pots.map((pt, k) => {
     const title = k === 0 ? 'Main pot' : `Side pot ${k}`;
     if (pt.elig.length === 1) return `<div class="potblock auto"><div class="pothead"><span>${title}</span><b>${fmt(pt.amount)}</b></div><p class="auto-note">Nobody matched these chips, so they go back to ${esc(P(pt.elig[0]).name)}.</p></div>`;
-    return `<div class="potblock"><div class="pothead"><span>${title} · ${pt.elig.length} players</span><b>${fmt(pt.amount)}</b></div>
-      <div class="pick">${pt.elig.map(i => `<button class="pick-btn${pt.win.includes(i) ? ' on' : ''}" data-pot="${k}" data-i="${i}" aria-pressed="${pt.win.includes(i)}">${esc(P(i).name)}</button>`).join('')}</div></div>`;
+    const runs = potRuns(pt), head = `<div class="pothead"><span>${title} · ${pt.elig.length} players</span><b>${fmt(pt.amount)}</b></div>`;
+    if (runs.length === 1) return `<div class="potblock">${head}<div class="pick">${pt.elig.map(i => btn(k, 0, i, runs[0])).join('')}</div></div>`;
+    // one row per run, then what each player ends up with from this pot
+    const rows = runs.map((w, r) => `<div class="runrow"><span class="runlbl">Run ${r + 1}<small>${fmt(runAmount(pt, r, runs.length))}</small></span><div class="pick">${pt.elig.map(i => btn(k, r, i, w)).join('')}</div></div>`).join('');
+    const done = runs.every(w => w.length), sh = potShares(pt);
+    const note = done ? Object.keys(sh).map(Number).sort((a, b) => sh[b] - sh[a]).map(i => `<b>${esc(P(i).name)}</b> ${fmt(sh[i])} (${Math.round(100 * sh[i] / pt.amount)}%)`).join(' · ')
+                      : `Pick a winner for ${runs.filter(w => !w.length).length === runs.length ? 'every' : 'each remaining'} run.`;
+    return `<div class="potblock">${head}${rows}<p class="splitnote">${note}</p></div>`;
   }).join('');
-  const ready = S.pots.every(pt => pt.win.length);
+  const ready = potsReady();
   $('#sd-award').disabled = !ready;
-  $('#sd-award').textContent = ready && S.pots.some(pt => pt.win.length > 1 && pt.elig.length > 1) ? 'Split and pay out' : 'Pay out';
+  const split = S.pots.some(pt => pt.elig.length > 1 && Object.keys(potShares(pt)).length > 1);
+  $('#sd-award').textContent = ready && split ? 'Split and pay out' : 'Pay out';
 }
 $('#sd-body').addEventListener('click', e => {
+  if (e.target.closest('[data-runs-change]')){ closeSheets(); setTimeout(openRuns, 240); return; }
   const b = e.target.closest('.pick-btn'); if (!b) return;
-  const k = +b.dataset.pot, i = +b.dataset.i, pt = S.pots[k];
-  const at = pt.win.indexOf(i); if (at >= 0) pt.win.splice(at, 1); else pt.win.push(i);
+  const k = +b.dataset.pot, r = +b.dataset.run || 0, i = +b.dataset.i, pt = S.pots[k], w = potRuns(pt)[r]; if (!w) return;
+  const at = w.indexOf(i); if (at >= 0) w.splice(at, 1); else w.push(i);
+  // the best hand in a pot is also the best hand in any side pot it is part of, on the same run
   for (let j = k + 1; j < S.pots.length; j++){
-    const q = S.pots[j]; if (q.elig.length === 1) continue;
-    const inter = pt.win.filter(x => q.elig.includes(x)); if (inter.length) q.win = inter;
+    const q = S.pots[j]; if (q.elig.length === 1 || !potRuns(q)[r]) continue;
+    const inter = w.filter(x => q.elig.includes(x)); if (inter.length) setRunWin(q, r, inter);
   }
   Snd.tick(); hostSave(); renderShowdown();
 });
@@ -4792,7 +4903,7 @@ function phoneRender(){
   const st = Pn.st;
   if (!st){ return; }
   const me = phoneSeat(), p = me >= 0 ? st.players[me] : null;
-  $('#p-street').textContent = st.closed ? 'Closed' : st.stage === 'betting' ? STREETS[st.street] : st.stage === 'showdown' ? 'Showdown' : st.stage === 'lobby' ? 'Waiting to deal' : 'Between hands';
+  $('#p-street').textContent = st.closed ? 'Closed' : st.stage === 'betting' ? STREETS[st.street] : st.stage === 'showdown' ? showdownTitle(st) : st.stage === 'lobby' ? 'Waiting to deal' : 'Between hands';
   $('#p-board').innerHTML = boardHTML(st, Pn.last);
   $('#p-pot').textContent = fmt(potTotal(st));
   const strip = $('#p-strip');
@@ -4844,7 +4955,7 @@ function phoneRender(){
       (p.allIn ? '<p class="dock-note">You are all in. Sit back and watch.</p>' : actionButtons(st, me, 'phone', !myTurn || !!Pn.pending || !Pn.connected)));
   } else {
     const canTop = buyLimits(st, p).max > 0, owed = owedOf(p);
-    const msg = owed ? `You owe ${p.owe.map(o => `${esc(o.name)} ${fmt(o.amt)}`).join(' and ')} for the 7-2 bounty. Buy in to pay it and play on.` : st.stage === 'showdown' ? 'Showdown. The table device picks the winner.' : st.stage === 'betting' ? (p.out ? 'Out of chips this hand.' : p.last === 'Folded' ? 'You folded this hand.' : "You're dealt in from the next hand.") : st.stage === 'lobby' ? 'Waiting for the table to deal.' : 'Waiting for the next deal.';
+    const msg = owed ? `You owe ${p.owe.map(o => `${esc(o.name)} ${fmt(o.amt)}`).join(' and ')} for the 7-2 bounty. Buy in to pay it and play on.` : st.stage === 'showdown' ? (needRuns(st) ? 'All in. The table is choosing how many times to run the board.' : st.runs > 1 ? `Running it ${RUN_WORD[st.runs]}. The table device picks the winner of each run.` : 'Showdown. The table device picks the winner.') : st.stage === 'betting' ? (p.out ? 'Out of chips this hand.' : p.last === 'Folded' ? 'You folded this hand.' : "You're dealt in from the next hand.") : st.stage === 'lobby' ? 'Waiting for the table to deal.' : 'Waiting for the next deal.';
     setHTML(d, `<div class="actor"><div class="actor-name">${st.stage === 'betting' || st.stage === 'showdown' ? 'Hand in progress' : 'Between hands'}</div><div class="actor-meta">${msg}</div></div>` +
       (canTop ? `<div class="btns one"><button class="btn b-raise" data-p="topup"${p.topup ? ' disabled' : ''}>${p.topup ? `Buy-in of ${fmt(+p.topup || 0)} booked` : owed ? 'Buy in to pay' : 'Buy in'}</button></div>` : ''));
     // Owing a bounty: bring up the buy-in sheet once, so it can't be missed.
@@ -5238,7 +5349,7 @@ function renderHistDetail(code){
   $('#hd-pstats').innerHTML = statsHTML(st);
   const hs = (st.hands || []).slice(-15).reverse();
   $('#hd-hands').innerHTML = hs.length ? `<thead><tr><th>Hand</th><th>Winner</th><th class="num">Pot</th></tr></thead><tbody>` +
-    hs.map(h => `<tr><td>${h.n}</td><td class="nm">${esc(h.win.map(w => w[0]).join(' & '))}</td><td class="num">${fmt(h.pot)}</td></tr>`).join('') + '</tbody>' : '<tbody><tr><td>No hands finished yet.</td></tr></tbody>';
+    hs.map(h => `<tr><td>${h.n}</td><td class="nm">${esc(h.win.map(w => w[0]).join(' & '))}${h.runs > 1 ? ` <small>(ran it ${RUN_WORD[h.runs]})</small>` : ''}</td><td class="num">${fmt(h.pot)}</td></tr>`).join('') + '</tbody>' : '<tbody><tr><td>No hands finished yet.</td></tr></tbody>';
   $('#hd-actions').innerHTML = `<button class="cta alt" data-hd="csv">Download results (spreadsheet)</button>
     <button class="btn-sec" data-hd="export" style="margin:0;height:48px">Download table file</button>
     ${st.closed ? `<button class="btn-sec" data-hd="continue" style="margin:0;height:48px">Continue in a new table</button>` : ''}
@@ -5255,7 +5366,7 @@ function downloadCsv(code, live){
     ['Chip value', rateText(moneyOf(st))], [],
     ['Player', 'Bought', 'Chips', 'Net', `Net (${moneyOf(st).cur})`, 'Hands won'], ...sm.rows.map(x => [x.name + (x.left ? ' (left)' : ''), x.bought, x.chips, x.net, +toMoney(x.net, moneyOf(st)).toFixed(2), x.won]), [],
     ['Who pays', 'Pays who', `Amount (${moneyOf(st).cur})`, 'Chips'], ...settlePlan(st).pays.map(x => [x.from, x.to, +toMoney(x.chips, moneyOf(st)).toFixed(2), x.chips]), [],
-    ['Hand', 'Pot', 'Winners'], ...(st.hands || []).map(h => [h.n, h.pot, h.win.map(w => `${w[0]} ${w[1]}`).join('; ')])];
+    ['Hand', 'Pot', 'Winners', 'Board runs'], ...(st.hands || []).map(h => [h.n, h.pot, h.win.map(w => `${w[0]} ${w[1]}`).join('; '), h.runs || (h.sd ? 1 : '')])];
   // betting behaviour: tendencies, actions by street, and every action of every tracked hand (for pivot tables)
   const ps = playerStats(st);
   if (ps.logged){
